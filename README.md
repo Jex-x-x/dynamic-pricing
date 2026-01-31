@@ -57,7 +57,14 @@ ratio = actual_orders / expected
 | Маркетплейс | Статус | API Prices | API Update |
 |-------------|--------|------------|------------|
 | Ozon | ✅ Production | v5/product/info/prices | v1/product/import/prices |
-| Wildberries | 🚧 В разработке | /api/v1/prices | /api/v1/prices |
+| Wildberries | ✅ Ready | /api/v2/list/goods/filter | /api/v2/upload/task |
+
+### Особенности Wildberries
+
+- **Модель ценообразования:** base_price × (1 - discount%) = final_price
+- **Rate limit:** 10 запросов / 6 секунд
+- **Quarantine:** Если новая цена < старой/3, товар уходит в карантин
+- **Асинхронное обновление:** API возвращает task_id, статус проверяется отдельно
 
 ## Быстрый старт
 
