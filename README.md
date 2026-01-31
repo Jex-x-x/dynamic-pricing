@@ -54,10 +54,10 @@ ratio = actual_orders / expected
 
 ## Маркетплейсы
 
-| Маркетплейс | Статус | API Prices | API Update |
-|-------------|--------|------------|------------|
-| Ozon | ✅ Production | v5/product/info/prices | v1/product/import/prices |
-| Wildberries | ✅ Ready | /api/v2/list/goods/filter | /api/v2/upload/task |
+| Маркетплейс | Статус | Товаров | API Prices | API Update |
+|-------------|--------|---------|------------|------------|
+| Ozon | ✅ Production | ~3800 | v5/product/info/prices | v1/product/import/prices |
+| Wildberries | ✅ Production | ~5553 | /api/v2/list/goods/filter | /api/v2/upload/task |
 
 ### Особенности Wildberries
 

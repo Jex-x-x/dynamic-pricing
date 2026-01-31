@@ -1,6 +1,9 @@
 {
   "name": "WB Dynamic Pricing - Demand Detector",
   "description": "Dynamic pricing for Wildberries with Bitrix-friendly base price detection (v2.0)",
+  "_n8n_workflow_id": "aiGMF7tsy3U2udXt",
+  "_deployed_at": "2026-01-31",
+  "_status": "production",
   "nodes": [
     {
       "id": "schedule-trigger",
@@ -22,7 +25,7 @@
       "position": [440, 300],
       "parameters": {
         "method": "GET",
-        "url": "={{ $vars.WB_CONFIG_URL }}"
+        "url": "https://autopapyrus.com/local/api/dynamic_pricing_config_wb.php"
       }
     },
     {
@@ -32,7 +35,7 @@
       "typeVersion": 2,
       "position": [640, 300],
       "parameters": {
-        "jsCode": "// ============================================\n// ANALYZE DEMAND - Calculate multiplier\n// Время по Москве (UTC+3)\n// ============================================\n\nconst config = $input.first().json;\nconst pricing = config.pricing || {};\n\n// Config defaults\nconst BASELINE = pricing.baseline_orders_day || 45;\nconst THRESHOLD_HIGH = pricing.threshold_high || 1.2;\nconst THRESHOLD_LOW = pricing.threshold_low || 0.8;\nconst STEP = pricing.step || 0.05;\nconst MAX_MULT = pricing.max_multiplier || 1.70;\nconst MIN_MULT = pricing.min_multiplier || 0.85;\n\nlet currentMult = pricing.current_multiplier || 1.0;\n\n// Moscow time (UTC+3)\nconst now = new Date();\nconst moscowOffset = 3 * 60;\nconst localOffset = now.getTimezoneOffset();\nconst moscowTime = new Date(now.getTime() + (moscowOffset + localOffset) * 60 * 1000);\nconst moscowHours = moscowTime.getHours() + moscowTime.getMinutes() / 60;\n\n// Expected orders by this time (proportional)\nconst expected = BASELINE * (moscowHours / 24);\n\n// TODO: Get actual WB orders from your order source\n// For now using 0, replace with actual order count\nconst actualOrders = 0;\n\nconst ratio = expected > 0 ? actualOrders / expected : 0;\n\nlet decision = 'hold';\nlet reason = '';\nlet newMult = currentMult;\n\nif (ratio > THRESHOLD_HIGH) {\n  newMult = Math.min(MAX_MULT, currentMult + STEP);\n  decision = newMult > currentMult ? 'increase' : 'hold_max';\n  reason = `High demand: ratio ${ratio.toFixed(2)} > ${THRESHOLD_HIGH}`;\n} else if (ratio < THRESHOLD_LOW) {\n  newMult = Math.max(MIN_MULT, currentMult - STEP);\n  decision = newMult < currentMult ? 'decrease' : 'hold_min';\n  reason = `Low demand: ratio ${ratio.toFixed(2)} < ${THRESHOLD_LOW}`;\n} else {\n  decision = 'hold';\n  reason = `Ratio ${ratio.toFixed(2)} in range [${THRESHOLD_LOW}-${THRESHOLD_HIGH}]`;\n}\n\nnewMult = Math.round(newMult * 100) / 100;\n\nreturn [{\n  json: {\n    ...config,\n    pricing: {\n      ...pricing,\n      current_multiplier: newMult,\n      last_check: new Date().toISOString(),\n      last_decision: decision,\n      last_reason: `${reason} (${actualOrders} vs ${expected.toFixed(1)} expected)`,\n      moscow_hours: moscowHours.toFixed(1),\n      last_change: decision !== 'hold' ? new Date().toISOString() : pricing.last_change\n    }\n  }\n}];"
+        "jsCode": "// ANALYZE DEMAND FOR WILDBERRIES\n// Считает заказы WB из Bitrix\n\nconst BITRIX_URL = '{{BITRIX_WEBHOOK_URL}}';\nconst config = $input.first().json;\nconst pricing = config.pricing || {};\n\nconst BASELINE = pricing.baseline_orders_day || 45;\nconst THRESHOLD_HIGH = pricing.threshold_high || 1.20;\nconst THRESHOLD_LOW = pricing.threshold_low || 0.80;\nconst STEP = pricing.step || 0.05;\nconst MAX_MULT = pricing.max_multiplier || 1.70;\nconst MIN_MULT = pricing.min_multiplier || 0.85;\nlet currentMult = pricing.current_multiplier || 1.0;\n\n// Moscow time (UTC+3)\nconst now = new Date();\nconst moscowOffset = 3 * 60;\nconst utcMs = now.getTime() + (now.getTimezoneOffset() * 60000);\nconst moscowMs = utcMs + (moscowOffset * 60000);\nconst moscowNow = new Date(moscowMs);\n\nconst hoursPassedToday = moscowNow.getHours() + (moscowNow.getMinutes() / 60);\nconst expectedOrders = Math.max(1, BASELINE * (hoursPassedToday / 24));\nconst midnightStr = moscowNow.toISOString().slice(0, 10) + ' 00:01:00';\n\nlet allOrders = [];\nlet start = 0;\nlet hasMore = true;\n\nwhile (hasMore && allOrders.length < 500) {\n  const response = await this.helpers.httpRequest({\n    method: 'POST',\n    url: `${BITRIX_URL}/sale.order.list`,\n    body: {\n      filter: { '>=dateInsert': midnightStr },\n      select: ['id', 'xmlId', 'dateInsert'],\n      start: start\n    },\n    headers: { 'Content-Type': 'application/json' }\n  });\n  \n  const orders = response.result?.orders || [];\n  allOrders = allOrders.concat(orders);\n  \n  if (response.next) {\n    start = response.next;\n  } else {\n    hasMore = false;\n  }\n}\n\n// Filter WB orders\nconst wbOrders = allOrders.filter(o => {\n  const xmlId = (o.xmlId || '').toUpperCase();\n  return xmlId.startsWith('WB_') || xmlId.startsWith('WILDBERRIES_');\n});\nconst actualOrders = wbOrders.length;\n\nconst ratio = actualOrders / expectedOrders;\nlet decision = 'hold';\nlet newMult = currentMult;\nlet reason = '';\n\nif (ratio > THRESHOLD_HIGH && currentMult < MAX_MULT) {\n  decision = 'raise';\n  newMult = Math.min(MAX_MULT, +(currentMult + STEP).toFixed(2));\n  reason = `Ratio ${ratio.toFixed(2)} > ${THRESHOLD_HIGH}`;\n} else if (ratio < THRESHOLD_LOW && currentMult > MIN_MULT) {\n  decision = 'lower';\n  newMult = Math.max(MIN_MULT, +(currentMult - STEP).toFixed(2));\n  reason = `Ratio ${ratio.toFixed(2)} < ${THRESHOLD_LOW}`;\n} else {\n  reason = `Ratio ${ratio.toFixed(2)} in range`;\n}\n\nconfig.pricing.current_multiplier = newMult;\nconfig.pricing.last_check = now.toISOString();\nconfig.pricing.last_decision = decision;\nconfig.pricing.last_reason = reason;\nconfig.pricing.moscow_hours = hoursPassedToday.toFixed(1);\nif (decision !== 'hold') {\n  config.pricing.last_change = now.toISOString();\n}\n\nreturn [{\n  json: {\n    timestamp: now.toISOString(),\n    moscow_hours: hoursPassedToday.toFixed(1),\n    decision: decision,\n    old_multiplier: currentMult,\n    new_multiplier: newMult,\n    reason: reason,\n    actual_orders: actualOrders,\n    expected_orders: expectedOrders.toFixed(1),\n    ratio: ratio.toFixed(2),\n    configToSave: config\n  }\n}];"
       }
     },
     {
@@ -43,16 +46,17 @@
       "position": [840, 300],
       "parameters": {
         "method": "POST",
-        "url": "={{ $vars.WB_CONFIG_URL }}",
+        "url": "https://autopapyrus.com/local/api/dynamic_pricing_config_wb.php",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {"name": "X-Token", "value": "={{ $vars.CONFIG_TOKEN }}"}
+            {"name": "X-Token", "value": "{{CONFIG_TOKEN}}"},
+            {"name": "Content-Type", "value": "application/json"}
           ]
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify($json) }}"
+        "jsonBody": "={{ JSON.stringify($json.configToSave) }}"
       }
     },
     {
@@ -62,7 +66,7 @@
       "typeVersion": 2,
       "position": [1040, 300],
       "parameters": {
-        "jsCode": "// ============================================\n// GET WILDBERRIES PRICES - with pagination\n// Rate limit: 10 requests per 6 seconds\n// ============================================\n\nconst WB_API_KEY = $vars.WB_API_KEY;\nconst WB_API_BASE = 'https://discounts-prices-api.wildberries.ru';\n\nconst allPrices = [];\nlet offset = 0;\nconst limit = 1000;\nlet hasMore = true;\n\nwhile (hasMore) {\n  const response = await fetch(\n    `${WB_API_BASE}/api/v2/list/goods/filter?limit=${limit}&offset=${offset}`,\n    {\n      method: 'GET',\n      headers: {\n        'Authorization': WB_API_KEY,\n        'Content-Type': 'application/json'\n      }\n    }\n  );\n\n  if (!response.ok) {\n    throw new Error(`WB API error: ${response.status}`);\n  }\n\n  const data = await response.json();\n  const items = data.data?.listGoods || [];\n\n  for (const item of items) {\n    allPrices.push({\n      offer_id: String(item.nmID),\n      nm_id: item.nmID,\n      vendor_code: item.vendorCode,\n      // WB model: price is base, discountedPrice is final\n      price: item.sizes?.[0]?.price || 0,\n      discount: item.discount || 0,\n      discounted_price: item.sizes?.[0]?.discountedPrice || 0\n    });\n  }\n\n  offset += limit;\n  hasMore = items.length === limit;\n\n  // Rate limiting: max 10 requests per 6 seconds\n  if (hasMore) {\n    await new Promise(resolve => setTimeout(resolve, 600));\n  }\n}\n\nconst prevNode = $('Save Config').first().json;\n\nreturn [{\n  json: {\n    ...prevNode,\n    total_products: allPrices.length,\n    all_prices: allPrices\n  }\n}];"
+        "jsCode": "// GET WILDBERRIES PRICES\n\nconst WB_API_KEY = '{{WB_API_KEY}}';\nconst WB_API_BASE = 'https://discounts-prices-api.wildberries.ru';\n\nconst demandData = $('Analyze Demand').first().json;\nconst allPrices = [];\nlet offset = 0;\nconst limit = 1000;\nlet hasMore = true;\n\nwhile (hasMore) {\n  const response = await this.helpers.httpRequest({\n    method: 'GET',\n    url: `${WB_API_BASE}/api/v2/list/goods/filter?limit=${limit}&offset=${offset}`,\n    headers: {\n      'Authorization': WB_API_KEY,\n      'Content-Type': 'application/json'\n    }\n  });\n\n  const items = response.data?.listGoods || [];\n\n  for (const item of items) {\n    allPrices.push({\n      offer_id: String(item.nmID),\n      nm_id: item.nmID,\n      vendor_code: item.vendorCode,\n      price: item.sizes?.[0]?.price || 0,\n      discount: item.discount || 0,\n      discounted_price: item.sizes?.[0]?.discountedPrice || 0\n    });\n  }\n\n  offset += limit;\n  hasMore = items.length === limit;\n\n  if (hasMore) {\n    await new Promise(resolve => setTimeout(resolve, 600));\n  }\n}\n\nreturn [{\n  json: {\n    ...demandData,\n    total_products: allPrices.length,\n    all_prices: allPrices\n  }\n}];"
       }
     },
     {
@@ -72,7 +76,7 @@
       "typeVersion": 2,
       "position": [1240, 300],
       "parameters": {
-        "jsCode": "// ============================================\n// CALCULATE NEW PRICES - Bitrix-friendly v2.0\n// \n// Логика:\n// 1. Если currentPrice ≈ savedBase × multiplier (±1%) → ничего не делать\n// 2. Если currentPrice ≠ целевой → Bitrix обновил базу\n//    → принять как новую базу\n//    → применить multiplier через discount\n//    → отправить в WB\n//\n// WB модель: finalPrice = price × (1 - discount/100)\n// ============================================\n\nconst input = $input.first().json;\nconst allPrices = input.all_prices || [];\nconst multiplier = input.pricing?.current_multiplier || 1.0;\n\n// Load saved base prices\nconst BASE_PRICES_URL = $vars.WB_BASE_PRICES_URL;\nlet savedBasePrices = {};\n\ntry {\n  const response = await fetch(BASE_PRICES_URL);\n  const data = await response.json();\n  savedBasePrices = data.prices || {};\n} catch (e) {\n  console.log('No saved base prices, starting fresh');\n}\n\nconst TOLERANCE = 0.01; // 1%\nconst pricesToUpdate = [];\nconst updatedBasePrices = { ...savedBasePrices };\nlet baseChangedCount = 0;\nlet newProductsCount = 0;\n\n// Helper: calculate discount % to achieve target price\nfunction calcDiscount(basePrice, targetPrice) {\n  if (basePrice <= 0) return 0;\n  if (targetPrice >= basePrice) return 0;\n  return Math.round((1 - targetPrice / basePrice) * 100);\n}\n\n// Helper: check if price change would trigger quarantine (>3x drop)\nfunction wouldTriggerQuarantine(oldPrice, newPrice) {\n  return newPrice < oldPrice / 3;\n}\n\nfor (const item of allPrices) {\n  const offerId = String(item.offer_id);\n  // В WB: price = базовая цена, discounted_price = финальная\n  const wbBasePrice = item.price;  // База в WB\n  const currentFinalPrice = item.discounted_price || wbBasePrice;\n  const savedBase = savedBasePrices[offerId];\n\n  // New product - save WB base price\n  if (!savedBase) {\n    updatedBasePrices[offerId] = wbBasePrice;\n    newProductsCount++;\n    continue;\n  }\n\n  // Calculate what the target price SHOULD be\n  const targetPrice = Math.round(savedBase * multiplier);\n  \n  // Check if current final price matches target (±1%)\n  const diff = Math.abs(currentFinalPrice - targetPrice) / targetPrice;\n\n  if (diff < TOLERANCE) {\n    // Price is correct, nothing to do\n    continue;\n  }\n\n  // Price doesn't match target → Bitrix updated the base in WB\n  // Accept WB's current base price as the new base\n  updatedBasePrices[offerId] = wbBasePrice;\n  baseChangedCount++;\n\n  // Skip if multiplier is ~1.0 (no dynamic pricing needed)\n  if (Math.abs(multiplier - 1.0) < 0.01) {\n    continue;\n  }\n\n  // Calculate new target from the NEW base\n  const newTargetPrice = Math.round(wbBasePrice * multiplier);\n\n  // Check quarantine risk\n  if (wouldTriggerQuarantine(currentFinalPrice, newTargetPrice)) {\n    console.log(`Skipping ${offerId}: would trigger quarantine`);\n    continue;\n  }\n\n  // Calculate discount % to achieve target\n  const newDiscount = calcDiscount(wbBasePrice, newTargetPrice);\n\n  pricesToUpdate.push({\n    nmID: item.nm_id,\n    offer_id: offerId,\n    price: wbBasePrice,        // Keep WB base price\n    discount: newDiscount,      // Adjust discount to achieve target\n    target_price: newTargetPrice,\n    current_price: currentFinalPrice,\n    previous_base: savedBase,\n    new_base: wbBasePrice\n  });\n}\n\nreturn [{\n  json: {\n    multiplier,\n    decision: input.pricing?.last_decision || 'hold',\n    total_products: allPrices.length,\n    new_products: newProductsCount,\n    base_prices_changed: baseChangedCount,\n    prices_to_update: pricesToUpdate.length,\n    prices: pricesToUpdate,\n    updated_base_prices: updatedBasePrices\n  }\n}];"
+        "jsCode": "// CALCULATE NEW PRICES - Bitrix-friendly v2.0\n\nconst BASE_PRICES_URL = 'https://autopapyrus.com/local/api/dynamic_pricing_base_prices_wb.php';\nconst TOKEN = '{{CONFIG_TOKEN}}';\nconst TOLERANCE = 0.01;\n\nconst input = $input.first().json;\nconst allPrices = input.all_prices || [];\nconst multiplier = input.new_multiplier || 1.0;\nconst decision = input.decision || 'hold';\n\nlet savedBasePrices = {};\ntry {\n  const resp = await this.helpers.httpRequest({\n    method: 'GET',\n    url: BASE_PRICES_URL,\n    headers: { 'Content-Type': 'application/json' }\n  });\n  savedBasePrices = resp.prices || {};\n} catch (e) {\n  savedBasePrices = {};\n}\n\nconst pricesToUpdate = [];\nconst updatedBasePrices = { ...savedBasePrices };\nlet baseChangedCount = 0;\nlet newProductsCount = 0;\n\nfunction calcDiscount(basePrice, targetPrice) {\n  if (basePrice <= 0 || targetPrice >= basePrice) return 0;\n  return Math.round((1 - targetPrice / basePrice) * 100);\n}\n\nfunction wouldTriggerQuarantine(oldPrice, newPrice) {\n  return newPrice < oldPrice / 3;\n}\n\nfor (const item of allPrices) {\n  const offerId = String(item.offer_id);\n  const wbBasePrice = item.price;\n  const currentFinalPrice = item.discounted_price || wbBasePrice;\n  const savedBase = savedBasePrices[offerId];\n\n  if (!savedBase) {\n    updatedBasePrices[offerId] = wbBasePrice;\n    newProductsCount++;\n    \n    if (Math.abs(multiplier - 1.0) >= 0.01) {\n      const targetPrice = Math.round(wbBasePrice * multiplier);\n      if (!wouldTriggerQuarantine(currentFinalPrice, targetPrice)) {\n        pricesToUpdate.push({\n          nmID: item.nm_id,\n          offer_id: offerId,\n          price: wbBasePrice,\n          discount: calcDiscount(wbBasePrice, targetPrice),\n          target_price: targetPrice,\n          current_price: currentFinalPrice\n        });\n      }\n    }\n    continue;\n  }\n\n  const targetPrice = Math.round(savedBase * multiplier);\n  const diff = Math.abs(currentFinalPrice - targetPrice) / targetPrice;\n\n  if (diff < TOLERANCE) continue;\n\n  updatedBasePrices[offerId] = wbBasePrice;\n  baseChangedCount++;\n\n  if (Math.abs(multiplier - 1.0) < 0.01) continue;\n\n  const newTargetPrice = Math.round(wbBasePrice * multiplier);\n  if (wouldTriggerQuarantine(currentFinalPrice, newTargetPrice)) continue;\n\n  pricesToUpdate.push({\n    nmID: item.nm_id,\n    offer_id: offerId,\n    price: wbBasePrice,\n    discount: calcDiscount(wbBasePrice, newTargetPrice),\n    target_price: newTargetPrice,\n    current_price: currentFinalPrice\n  });\n}\n\nlet saveError = null;\ntry {\n  await this.helpers.httpRequest({\n    method: 'POST',\n    url: BASE_PRICES_URL,\n    headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },\n    body: JSON.stringify({ prices: updatedBasePrices })\n  });\n} catch (e) {\n  saveError = e.message || String(e);\n}\n\nreturn [{\n  json: {\n    multiplier,\n    decision,\n    total_products: allPrices.length,\n    new_products: newProductsCount,\n    base_prices_changed: baseChangedCount,\n    prices_to_update: pricesToUpdate.length,\n    prices: pricesToUpdate,\n    save_error: saveError\n  }\n}];"
       }
     },
     {
@@ -83,7 +87,6 @@
       "position": [1440, 300],
       "parameters": {
         "conditions": {
-          "options": {"caseSensitive": true, "leftValue": ""},
           "combinator": "and",
           "conditions": [
             {
@@ -102,7 +105,7 @@
       "typeVersion": 2,
       "position": [1640, 200],
       "parameters": {
-        "jsCode": "// ============================================\n// UPDATE WILDBERRIES PRICES\n// Асинхронное обновление через upload/task\n// ============================================\n\nconst input = $input.first().json;\nconst prices = input.prices || [];\n\nif (prices.length === 0) {\n  return [{ json: { ...input, update_result: { success: 0, errors: 0 } } }];\n}\n\nconst WB_API_KEY = $vars.WB_API_KEY;\nconst WB_API_BASE = 'https://discounts-prices-api.wildberries.ru';\n\n// Format for WB API\nconst formattedPrices = prices.map(p => ({\n  nmID: p.nmID,\n  price: p.price,\n  discount: p.discount\n}));\n\nconst response = await fetch(`${WB_API_BASE}/api/v2/upload/task`, {\n  method: 'POST',\n  headers: {\n    'Authorization': WB_API_KEY,\n    'Content-Type': 'application/json'\n  },\n  body: JSON.stringify({ data: formattedPrices })\n});\n\nlet updateResult = {\n  success: 0,\n  errors: 0,\n  taskId: null,\n  errorMessage: null\n};\n\nif (response.ok) {\n  const data = await response.json();\n  updateResult.taskId = data.data?.id;\n  updateResult.success = prices.length;\n} else {\n  updateResult.errors = prices.length;\n  updateResult.errorMessage = await response.text();\n}\n\n// Save updated base prices\nconst BASE_PRICES_URL = $vars.WB_BASE_PRICES_URL;\nconst TOKEN = $vars.CONFIG_TOKEN;\n\nlet saveError = null;\ntry {\n  const saveResponse = await fetch(BASE_PRICES_URL, {\n    method: 'POST',\n    headers: {\n      'Content-Type': 'application/json',\n      'X-Token': TOKEN\n    },\n    body: JSON.stringify({ prices: input.updated_base_prices })\n  });\n  if (!saveResponse.ok) {\n    saveError = await saveResponse.text();\n  }\n} catch (e) {\n  saveError = e.message;\n}\n\nreturn [{ json: { ...input, update_result: updateResult, save_error: saveError } }];"
+        "jsCode": "// UPDATE WILDBERRIES PRICES\n\nconst WB_API_KEY = '{{WB_API_KEY}}';\nconst WB_API_BASE = 'https://discounts-prices-api.wildberries.ru';\n\nconst calcData = $input.first().json;\nconst prices = calcData.prices || [];\n\nif (prices.length === 0) {\n  return [{ json: { ...calcData, success: 0, errors: 0, message: 'No prices to update' } }];\n}\n\nconst formattedPrices = prices.map(p => ({\n  nmID: parseInt(p.nmID),\n  price: parseInt(p.price),\n  discount: Math.max(0, Math.min(99, parseInt(p.discount) || 0))\n})).filter(p => p.nmID > 0 && p.price > 0);\n\nif (formattedPrices.length === 0) {\n  return [{ json: { ...calcData, success: 0, errors: 0, message: 'No valid prices' } }];\n}\n\nconst response = await this.helpers.httpRequest({\n  method: 'POST',\n  url: `${WB_API_BASE}/api/v2/upload/task`,\n  headers: {\n    'Authorization': WB_API_KEY,\n    'Content-Type': 'application/json'\n  },\n  body: { data: formattedPrices },\n  ignoreHttpStatusErrors: true,\n  returnFullResponse: true\n});\n\nconst statusCode = response.statusCode || response.status;\nconst body = response.body || response;\n\nlet result = {\n  success: 0,\n  errors: formattedPrices.length,\n  taskId: null,\n  statusCode: statusCode,\n  totalSent: formattedPrices.length\n};\n\nif (statusCode === 200 && body?.data?.id) {\n  result.success = formattedPrices.length;\n  result.errors = 0;\n  result.taskId = body.data.id;\n}\n\nreturn [{ json: { ...calcData, ...result } }];"
       }
     },
     {
@@ -110,7 +113,8 @@
       "name": "No Updates Needed",
       "type": "n8n-nodes-base.noOp",
       "typeVersion": 1,
-      "position": [1640, 400]
+      "position": [1640, 400],
+      "parameters": {}
     },
     {
       "id": "format-telegram",
@@ -119,7 +123,7 @@
       "typeVersion": 2,
       "position": [1840, 200],
       "parameters": {
-        "jsCode": "// Format Telegram message for WB\nconst input = $input.first().json;\nconst result = input.update_result || {};\nconst mult = input.multiplier || 1.0;\nconst decision = input.decision || 'hold';\nconst baseChanged = input.base_prices_changed || 0;\nconst newProducts = input.new_products || 0;\n\nlet emoji = '➡️';\nif (decision === 'increase') emoji = '📈';\nif (decision === 'decrease') emoji = '📉';\n\nlet message = `🟣 *WB Dynamic Pricing*\\n\\n`;\nmessage += `${emoji} ${decision.toUpperCase()}\\n\\n`;\nmessage += `📊 Множитель: *${mult}*\\n`;\nmessage += `📦 Всего товаров: *${input.total_products}*\\n`;\n\nif (newProducts > 0) {\n  message += `🆕 Новых товаров: *${newProducts}*\\n`;\n}\n\nif (baseChanged > 0) {\n  message += `\\n🏢 *Обновления из Bitrix:* ${baseChanged} товаров\\n`;\n}\n\nif (result.success > 0 || result.errors > 0) {\n  message += `\\n💰 *Обновление цен:*\\n`;\n  message += `✅ Успешно: *${result.success}*\\n`;\n  if (result.errors > 0) {\n    message += `❌ Ошибок: *${result.errors}*\\n`;\n  }\n  if (result.taskId) {\n    message += `📋 Task ID: \\`${result.taskId}\\`\\n`;\n  }\n}\n\nif (input.save_error) {\n  message += `\\n⚠️ Ошибка сохранения баз: ${input.save_error}\\n`;\n}\n\nreturn [{ json: { message, skip: false } }];"
+        "jsCode": "const updateResult = $input.first().json;\nconst calcData = $('Calculate New Prices').first().json;\n\nconst multiplier = calcData.multiplier;\nconst decision = calcData.decision;\nconst baseChanged = calcData.base_prices_changed || 0;\nconst totalProducts = calcData.total_products || 0;\nconst newProducts = calcData.new_products || 0;\n\nconst updated = updateResult.success || 0;\nconst errors = updateResult.errors || 0;\nconst taskId = updateResult.taskId || null;\n\nif (updated === 0 && errors === 0 && baseChanged === 0 && newProducts === 0) {\n  return [{ json: { skip: true } }];\n}\n\nconst decisionRu = {\n  'raise': '📈 ПОВЫШЕНИЕ',\n  'lower': '📉 СНИЖЕНИЕ',\n  'hold': '➡️ БЕЗ ИЗМЕНЕНИЙ'\n};\n\nlet message = `🟣 *WB Dynamic Pricing*\\n\\n`;\nmessage += `${decisionRu[decision] || decision}\\n\\n`;\nmessage += `📊 Множитель: *${multiplier}*\\n`;\nmessage += `📦 Всего товаров: *${totalProducts}*\\n`;\n\nif (newProducts > 0) message += `🆕 Новых товаров: *${newProducts}*\\n`;\nif (baseChanged > 0) message += `\\n🏢 *Обновления из Bitrix:* ${baseChanged} товаров\\n`;\n\nif (updated > 0 || errors > 0) {\n  message += `\\n💰 *Обновление цен:*\\n`;\n  message += `✅ Успешно: *${updated}*\\n`;\n  if (errors > 0) message += `❌ Ошибок: *${errors}*\\n`;\n  if (taskId) message += `📋 Task ID: \\`${taskId}\\`\\n`;\n}\n\nreturn [{ json: { message, skip: false } }];"
       }
     },
     {
@@ -129,39 +133,33 @@
       "typeVersion": 1.2,
       "position": [2040, 200],
       "parameters": {
-        "chatId": "={{ $vars.TELEGRAM_CHAT_ID }}",
+        "operation": "sendMessage",
+        "chatId": "{{TELEGRAM_CHAT_ID}}",
         "text": "={{ $json.message }}",
-        "additionalFields": {
-          "parse_mode": "Markdown"
-        }
+        "additionalFields": {"parse_mode": "Markdown"}
       },
       "credentials": {
-        "telegramApi": {
-          "id": "YOUR_TELEGRAM_CREDENTIAL_ID",
-          "name": "Telegram"
-        }
+        "telegramApi": {"id": "{{TELEGRAM_CREDENTIAL_ID}}", "name": "Telegram"}
       }
     }
   ],
   "connections": {
-    "Every 30 min": {"main": [[{"node": "Get Config"}]]},
-    "Get Config": {"main": [[{"node": "Analyze Demand"}]]},
-    "Analyze Demand": {"main": [[{"node": "Save Config"}]]},
-    "Save Config": {"main": [[{"node": "Get WB Prices"}]]},
-    "Get WB Prices": {"main": [[{"node": "Calculate New Prices"}]]},
-    "Calculate New Prices": {"main": [[{"node": "Has Updates?"}]]},
-    "Has Updates?": {"main": [[{"node": "Update WB Prices"}], [{"node": "No Updates Needed"}]]},
-    "Update WB Prices": {"main": [[{"node": "Format Telegram"}]]},
-    "Format Telegram": {"main": [[{"node": "Send Telegram"}]]}
+    "Every 30 min": {"main": [[{"node": "Get Config", "type": "main", "index": 0}]]},
+    "Get Config": {"main": [[{"node": "Analyze Demand", "type": "main", "index": 0}]]},
+    "Analyze Demand": {"main": [[{"node": "Save Config", "type": "main", "index": 0}]]},
+    "Save Config": {"main": [[{"node": "Get WB Prices", "type": "main", "index": 0}]]},
+    "Get WB Prices": {"main": [[{"node": "Calculate New Prices", "type": "main", "index": 0}]]},
+    "Calculate New Prices": {"main": [[{"node": "Has Updates?", "type": "main", "index": 0}]]},
+    "Has Updates?": {"main": [[{"node": "Update WB Prices", "type": "main", "index": 0}], [{"node": "No Updates Needed", "type": "main", "index": 0}]]},
+    "Update WB Prices": {"main": [[{"node": "Format Telegram", "type": "main", "index": 0}]]},
+    "Format Telegram": {"main": [[{"node": "Send Telegram", "type": "main", "index": 0}]]}
   },
-  "settings": {
-    "executionOrder": "v1"
-  },
+  "settings": {"executionOrder": "v1"},
   "_variables_required": [
-    "WB_API_KEY - Wildberries API ключ",
-    "WB_CONFIG_URL - URL к dynamic_pricing_config_wb.php",
-    "WB_BASE_PRICES_URL - URL к dynamic_pricing_base_prices_wb.php",
-    "CONFIG_TOKEN - токен для записи",
-    "TELEGRAM_CHAT_ID - ID чата для уведомлений"
+    "WB_API_KEY - Wildberries API токен",
+    "BITRIX_WEBHOOK_URL - URL вебхука Bitrix",
+    "CONFIG_TOKEN - токен для записи в storage",
+    "TELEGRAM_CHAT_ID - ID чата Telegram",
+    "TELEGRAM_CREDENTIAL_ID - ID credentials Telegram в n8n"
   ]
 }
