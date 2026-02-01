@@ -1,0 +1,156 @@
+{
+  "name": "Ozon Dynamic Pricing - Demand Detector",
+  "id": "idqxU0Bt1fMUGcYF",
+  "active": true,
+  "nodes": [
+    {
+      "id": "schedule-trigger",
+      "name": "Every 30 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300],
+      "parameters": {
+        "rule": {
+          "interval": [{"field": "minutes", "minutesInterval": 30}]
+        }
+      }
+    },
+    {
+      "id": "get-config",
+      "name": "Get Config",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [440, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "https://autopapyrus.com/local/api/dynamic_pricing_config.php"
+      }
+    },
+    {
+      "id": "analyze-demand",
+      "name": "Analyze Demand",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 300],
+      "parameters": {
+        "jsCode": "const BITRIX_URL = 'https://autopapyrus.com/rest/1/km09ybiord91hk6r';\nconst config = $input.first().json;\nconst pricing = config.pricing || {};\n\nconst BASELINE = pricing.baseline_orders_day || 45;\nconst THRESHOLD_HIGH = pricing.threshold_high || 1.20;\nconst THRESHOLD_LOW = pricing.threshold_low || 0.80;\nconst STEP = pricing.step || 0.05;\nconst MAX_MULT = pricing.max_multiplier || 1.70;\nconst MIN_MULT = pricing.min_multiplier || 0.85;\nlet currentMult = pricing.current_multiplier || 1.0;\n\n// === MOSCOW TIME (UTC+3) ===\nconst now = new Date();\nconst moscowOffset = 3 * 60;\nconst utcMs = now.getTime() + (now.getTimezoneOffset() * 60000);\nconst moscowMs = utcMs + (moscowOffset * 60000);\nconst moscowNow = new Date(moscowMs);\n\nconst hoursPassedToday = moscowNow.getHours() + (moscowNow.getMinutes() / 60);\nconst expectedOrders = Math.max(1, BASELINE * (hoursPassedToday / 24));\n\nconst midnightStr = moscowNow.toISOString().slice(0, 10) + ' 00:01:00';\n\nlet allOrders = [];\nlet start = 0;\nlet hasMore = true;\n\nwhile (hasMore && allOrders.length < 500) {\n  const response = await this.helpers.httpRequest({\n    method: 'POST',\n    url: `${BITRIX_URL}/sale.order.list`,\n    body: {\n      filter: { '>=dateInsert': midnightStr },\n      select: ['id', 'xmlId', 'dateInsert'],\n      start: start\n    },\n    headers: { 'Content-Type': 'application/json' }\n  });\n  \n  const orders = response.result?.orders || [];\n  allOrders = allOrders.concat(orders);\n  \n  if (response.next) {\n    start = response.next;\n  } else {\n    hasMore = false;\n  }\n}\n\nconst ozonOrders = allOrders.filter(o => (o.xmlId || '').startsWith('OZON_'));\nconst actualOrders = ozonOrders.length;\n\nconst ratio = actualOrders / expectedOrders;\nlet decision = 'hold';\nlet newMult = currentMult;\nlet reason = '';\n\nif (ratio > THRESHOLD_HIGH && currentMult < MAX_MULT) {\n  decision = 'raise';\n  newMult = Math.min(MAX_MULT, +(currentMult + STEP).toFixed(2));\n  reason = `Ratio ${ratio.toFixed(2)} > ${THRESHOLD_HIGH} (${actualOrders} vs ${expectedOrders.toFixed(1)} expected)`;\n} else if (ratio < THRESHOLD_LOW && currentMult > MIN_MULT) {\n  decision = 'lower';\n  newMult = Math.max(MIN_MULT, +(currentMult - STEP).toFixed(2));\n  reason = `Ratio ${ratio.toFixed(2)} < ${THRESHOLD_LOW} (${actualOrders} vs ${expectedOrders.toFixed(1)} expected)`;\n} else {\n  reason = `Ratio ${ratio.toFixed(2)} in range [${THRESHOLD_LOW}-${THRESHOLD_HIGH}] (${actualOrders} vs ${expectedOrders.toFixed(1)} expected)`;\n}\n\nconst oldMult = currentMult;\nconfig.pricing.current_multiplier = newMult;\nconfig.pricing.last_check = now.toISOString();\nconfig.pricing.last_decision = decision;\nconfig.pricing.last_reason = reason;\nconfig.pricing.moscow_hours = hoursPassedToday.toFixed(1);\nif (decision !== 'hold') {\n  config.pricing.last_change = now.toISOString();\n}\n\nconst configToSave = { ...config };\n\nreturn [{\n  json: {\n    timestamp: now.toISOString(),\n    moscow_hours: hoursPassedToday.toFixed(1),\n    decision: decision,\n    old_multiplier: oldMult,\n    new_multiplier: newMult,\n    reason: reason,\n    actual_orders: actualOrders,\n    expected_orders: expectedOrders.toFixed(1),\n    ratio: ratio.toFixed(2),\n    configToSave: configToSave\n  }\n}];"
+      }
+    },
+    {
+      "id": "save-config",
+      "name": "Save Config",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [840, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://autopapyrus.com/local/api/dynamic_pricing_config.php",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {"name": "X-Token", "value": "{{X_TOKEN}}"},
+            {"name": "Content-Type", "value": "application/json"}
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.configToSave) }}"
+      }
+    },
+    {
+      "id": "get-ozon-prices",
+      "name": "Get Ozon Prices",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1040, 300],
+      "parameters": {
+        "jsCode": "// GET ALL OZON PRICES WITH PAGINATION (using cursor)\n\nconst OZON_CLIENT_ID = '{{OZON_CLIENT_ID}}';\nconst OZON_API_KEY = '{{OZON_API_KEY}}';\nconst PRICES_URL = 'https://api-seller.ozon.ru/v5/product/info/prices';\n\nlet allItems = [];\nlet cursor = '';\nlet pageCount = 0;\nconst MAX_PAGES = 10;\n\nwhile (pageCount < MAX_PAGES) {\n  const body = {\n    filter: { visibility: 'ALL' },\n    limit: 1000\n  };\n  \n  if (cursor) {\n    body.cursor = cursor;\n  }\n  \n  const response = await this.helpers.httpRequest({\n    method: 'POST',\n    url: PRICES_URL,\n    headers: {\n      'Client-Id': OZON_CLIENT_ID,\n      'Api-Key': OZON_API_KEY,\n      'Content-Type': 'application/json'\n    },\n    body: body\n  });\n  \n  const items = response.items || [];\n  allItems = allItems.concat(items);\n  pageCount++;\n  \n  if (items.length < 1000 || !response.cursor) {\n    break;\n  }\n  \n  cursor = response.cursor;\n}\n\nreturn [{\n  json: {\n    items: allItems,\n    total_fetched: allItems.length,\n    pages: pageCount\n  }\n}];"
+      }
+    },
+    {
+      "id": "calc-new-prices",
+      "name": "Calculate New Prices",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1240, 300],
+      "parameters": {
+        "jsCode": "// CALCULATE PRICES v2 - Bitrix as source of truth\n// Base prices from Bitrix catalog.price.list (type 2)\n// 888-prefix mapping: Ozon offer_id '888XXXXX' -> Bitrix productId 'XXXXX'\n\nconst BITRIX_URL = '{{BITRIX_URL}}';\nconst BASE_PRICES_URL = 'https://autopapyrus.com/local/api/dynamic_pricing_base_prices.php';\nconst TOKEN = '{{X_TOKEN}}';\nconst TOLERANCE = 0.01;\n\nconst ozonResponse = $input.first().json;\nconst demandData = $('Analyze Demand').first().json;\n\nconst multiplier = demandData.new_multiplier || 1.0;\nconst ozonItems = ozonResponse.items || [];\n\nif (ozonItems.length === 0) {\n  return [{ json: { error: 'No products from Ozon', prices: [], bitrix_matched: 0 } }];\n}\n\n// 1. Get ALL prices from Bitrix (type 2) with pagination\nconst bitrixPrices = {};\nlet start = 0;\nlet hasMore = true;\n\nwhile (hasMore) {\n  const resp = await this.helpers.httpRequest({\n    method: 'POST',\n    url: `${BITRIX_URL}/catalog.price.list`,\n    headers: { 'Content-Type': 'application/json' },\n    body: {\n      filter: { catalogGroupId: 2 },\n      select: ['productId', 'price'],\n      start: start\n    }\n  });\n  \n  const prices = resp.result?.prices || [];\n  for (const p of prices) {\n    bitrixPrices[String(p.productId)] = p.price;\n  }\n  \n  if (resp.next) {\n    start = resp.next;\n  } else {\n    hasMore = false;\n  }\n}\n\n// 2. Process each Ozon product\nconst newPrices = [];\nconst basePricesLog = {};\nlet matchedCount = 0;\nlet unmatchedCount = 0;\n\nfor (const item of ozonItems) {\n  const offerId = item.offer_id;\n  const currentPrice = parseFloat(item.price?.price || 0);\n  const currentMinPrice = parseFloat(item.price?.min_price || 0);\n  \n  // Map 888-prefix to Bitrix ID\n  let bitrixId = offerId;\n  if (offerId.startsWith('888')) {\n    bitrixId = offerId.slice(3);\n  }\n  \n  const basePrice = bitrixPrices[bitrixId];\n  \n  if (!basePrice) {\n    unmatchedCount++;\n    continue;\n  }\n  \n  matchedCount++;\n  basePricesLog[offerId] = basePrice;\n  \n  // Calculate target prices\n  const targetPrice = Math.round(basePrice * multiplier);\n  const targetMinPrice = Math.round(basePrice * 0.8);\n  const targetOldPrice = Math.round(basePrice * 1.6);\n  \n  const priceDiff = Math.abs(currentPrice - targetPrice) / targetPrice;\n  const minPriceDiff = currentMinPrice > 0 \n    ? Math.abs(currentMinPrice - targetMinPrice) / targetMinPrice \n    : 1;\n  \n  if (priceDiff < TOLERANCE && minPriceDiff < TOLERANCE) {\n    continue;\n  }\n  \n  newPrices.push({\n    offer_id: offerId,\n    price: String(targetPrice),\n    min_price: String(targetMinPrice),\n    old_price: String(targetOldPrice),\n    currency_code: 'RUB'\n  });\n}\n\n// 3. Save base prices to file for logging\ntry {\n  await this.helpers.httpRequest({\n    method: 'POST',\n    url: BASE_PRICES_URL,\n    headers: { 'Content-Type': 'application/json', 'X-Token': TOKEN },\n    body: JSON.stringify({ prices: basePricesLog, source: 'bitrix_type_2' })\n  });\n} catch (e) {}\n\nreturn [{\n  json: {\n    multiplier: multiplier,\n    decision: demandData.decision,\n    total_ozon: ozonItems.length,\n    bitrix_prices_loaded: Object.keys(bitrixPrices).length,\n    bitrix_matched: matchedCount,\n    bitrix_unmatched: unmatchedCount,\n    prices_to_update: newPrices.length,\n    prices: newPrices\n  }\n}];"
+      }
+    },
+    {
+      "id": "check-prices",
+      "name": "Has Updates?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1440, 300],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "1",
+              "leftValue": "={{ $json.prices_to_update }}",
+              "rightValue": 0,
+              "operator": {"type": "number", "operation": "gt"}
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "update-ozon-prices",
+      "name": "Update Ozon Prices",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1640, 200],
+      "parameters": {
+        "jsCode": "// UPDATE OZON PRICES IN BATCHES (max 1000 per request)\n\nconst OZON_CLIENT_ID = '{{OZON_CLIENT_ID}}';\nconst OZON_API_KEY = '{{OZON_API_KEY}}';\nconst UPDATE_URL = 'https://api-seller.ozon.ru/v1/product/import/prices';\nconst BATCH_SIZE = 1000;\n\nconst calcData = $input.first().json;\nconst allPrices = calcData.prices || [];\n\nif (allPrices.length === 0) {\n  return [{ json: { updated: 0, errors: 0, message: 'No prices to update' } }];\n}\n\nlet totalUpdated = 0;\nlet totalErrors = 0;\nlet allResults = [];\n\nfor (let i = 0; i < allPrices.length; i += BATCH_SIZE) {\n  const batch = allPrices.slice(i, i + BATCH_SIZE);\n  \n  const response = await this.helpers.httpRequest({\n    method: 'POST',\n    url: UPDATE_URL,\n    headers: {\n      'Client-Id': OZON_CLIENT_ID,\n      'Api-Key': OZON_API_KEY,\n      'Content-Type': 'application/json'\n    },\n    body: { prices: batch }\n  });\n  \n  const results = response.result || [];\n  allResults = allResults.concat(results);\n  \n  for (const r of results) {\n    if (r.updated) {\n      totalUpdated++;\n    } else {\n      totalErrors++;\n    }\n  }\n}\n\nreturn [{\n  json: {\n    total_sent: allPrices.length,\n    updated: totalUpdated,\n    errors: totalErrors,\n    batches: Math.ceil(allPrices.length / BATCH_SIZE),\n    result: allResults\n  }\n}];"
+      }
+    },
+    {
+      "id": "no-updates",
+      "name": "No Updates Needed",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1640, 400],
+      "parameters": {}
+    },
+    {
+      "id": "format-telegram",
+      "name": "Format Telegram",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1840, 200],
+      "parameters": {
+        "jsCode": "const updateResult = $input.first().json;\nconst calcData = $('Calculate New Prices').first().json;\n\nconst multiplier = calcData.multiplier;\nconst decision = calcData.decision;\nconst totalOzon = calcData.total_ozon || 0;\nconst bitrixLoaded = calcData.bitrix_prices_loaded || 0;\nconst bitrixMatched = calcData.bitrix_matched || 0;\nconst bitrixUnmatched = calcData.bitrix_unmatched || 0;\n\nconst updated = updateResult.updated || 0;\nconst errors = updateResult.errors || 0;\n\nif (updated === 0 && errors === 0) {\n  return [{ json: { skip: true } }];\n}\n\nconst decisionRu = {\n  'raise': '📈 ПОВЫШЕНИЕ',\n  'lower': '📉 СНИЖЕНИЕ',\n  'hold': '➡️ БЕЗ ИЗМЕНЕНИЙ'\n};\n\nlet message = `🔔 *Ozon Dynamic Pricing v2*\\n\\n`;\nmessage += `${decisionRu[decision] || decision}\\n\\n`;\nmessage += `📊 Множитель: *${multiplier}*\\n`;\nmessage += `📦 Товаров Ozon: *${totalOzon}*\\n`;\nmessage += `🏢 Цен из Bitrix: *${bitrixLoaded}*\\n`;\nmessage += `✅ Сопоставлено: *${bitrixMatched}*\\n`;\n\nif (bitrixUnmatched > 0) {\n  message += `⚠️ Без цены: *${bitrixUnmatched}*\\n`;\n}\n\nmessage += `\\n💰 *Обновление цен:*\\n`;\nmessage += `✅ Успешно: *${updated}*\\n`;\n\nif (errors > 0) {\n  message += `❌ Ошибок: *${errors}*\\n`;\n}\n\nmessage += `\\n_Формула: price=base×${multiplier}, min=base×0.8, old=base×1.6_`;\n\nreturn [{ json: { message, skip: false } }];"
+      }
+    },
+    {
+      "id": "send-telegram",
+      "name": "Send Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [2040, 200],
+      "parameters": {
+        "operation": "sendMessage",
+        "chatId": "{{TELEGRAM_CHAT_ID}}",
+        "text": "={{ $json.message }}",
+        "additionalFields": {"parse_mode": "Markdown"}
+      }
+    }
+  ],
+  "connections": {
+    "Every 30 min": {"main": [[{"node": "Get Config", "type": "main", "index": 0}]]},
+    "Get Config": {"main": [[{"node": "Analyze Demand", "type": "main", "index": 0}]]},
+    "Analyze Demand": {"main": [[{"node": "Save Config", "type": "main", "index": 0}]]},
+    "Save Config": {"main": [[{"node": "Get Ozon Prices", "type": "main", "index": 0}]]},
+    "Get Ozon Prices": {"main": [[{"node": "Calculate New Prices", "type": "main", "index": 0}]]},
+    "Calculate New Prices": {"main": [[{"node": "Has Updates?", "type": "main", "index": 0}]]},
+    "Has Updates?": {"main": [[{"node": "Update Ozon Prices", "type": "main", "index": 0}], [{"node": "No Updates Needed", "type": "main", "index": 0}]]},
+    "Update Ozon Prices": {"main": [[{"node": "Format Telegram", "type": "main", "index": 0}]]},
+    "Format Telegram": {"main": [[{"node": "Send Telegram", "type": "main", "index": 0}]]}
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
