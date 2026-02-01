@@ -29,17 +29,46 @@ dynamic-pricing/
 └── examples/                # Примеры конфигураций
 ```
 
+## Конфигурация
+
+### Ozon
+
+| Параметр | Значение | Описание |
+|----------|----------|----------|
+| baseline_orders_day | 35 | Целевое кол-во заказов в день |
+| min_multiplier | 0.85 | Минимальный множитель |
+| max_multiplier | 1.70 | Максимальный множитель |
+| step | 0.05 | Шаг изменения |
+| threshold_low | 0.8 | Порог снижения |
+| threshold_high | 1.2 | Порог повышения |
+
+**Источник базовых цен:** Bitrix catalog.price.list (type 2)
+**Маппинг:** Ozon `888XXXXX` → Bitrix `XXXXX`
+**Формула:** price = base × multiplier, min_price = base × 0.8, old_price = base × 1.6
+
+### Wildberries
+
+| Параметр | Значение | Описание |
+|----------|----------|----------|
+| baseline_orders_day | 15 | Целевое кол-во заказов в день |
+| min_multiplier | **0.60** | Минимальный множитель |
+| max_multiplier | 1.70 | Максимальный множитель |
+| step | 0.05 | Шаг изменения |
+| threshold_low | 0.8 | Порог снижения |
+| threshold_high | 1.2 | Порог повышения |
+
+**Источник базовых цен:** PHP файл (legacy) → планируется миграция на Bitrix
+
 ## Алгоритм
 
 ### Расчёт множителя
 
 ```
-baseline = 45 заказов/день (цель)
 expected = baseline × (часов_прошло / 24)
 ratio = actual_orders / expected
 
-Если ratio > 1.2 → multiplier += 5% (max 1.70)
-Если ratio < 0.8 → multiplier -= 5% (min 0.85)
+Если ratio > 1.2 → multiplier += 5% (max)
+Если ratio < 0.8 → multiplier -= 5% (min)
 ```
 
 ### Детекция базовых цен (v2.0)
