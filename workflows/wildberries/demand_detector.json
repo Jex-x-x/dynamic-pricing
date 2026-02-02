@@ -1,0 +1,152 @@
+{
+  "name": "WB Dynamic Pricing - Demand Detector",
+  "id": "aiGMF7tsy3U2udXt",
+  "active": true,
+  "updatedAt": "2026-02-02T07:13:22.628Z",
+  "nodes": [
+    {
+      "id": "schedule-trigger",
+      "name": "Every 30 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300],
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 30 }]
+        }
+      }
+    },
+    {
+      "id": "get-config",
+      "name": "Get Config",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [440, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "https://autopapyrus.com/local/api/dynamic_pricing_config_wb.php"
+      }
+    },
+    {
+      "id": "analyze-demand",
+      "name": "Analyze Demand",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 300],
+      "parameters": {
+        "jsCode": "// ANALYZE DEMAND FOR WILDBERRIES\n// Counts WB orders from Bitrix\n// See full code in n8n workflow"
+      }
+    },
+    {
+      "id": "save-config",
+      "name": "Save Config",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [840, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://autopapyrus.com/local/api/dynamic_pricing_config_wb.php"
+      }
+    },
+    {
+      "id": "get-wb-prices",
+      "name": "Get WB Prices",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1040, 300],
+      "parameters": {
+        "jsCode": "// GET WILDBERRIES PRICES - with pagination\n// Rate limit: 10 requests per 6 seconds\n// See full code in n8n workflow"
+      }
+    },
+    {
+      "id": "calc-new-prices",
+      "name": "Calculate New Prices",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1240, 300],
+      "parameters": {
+        "jsCode": "// CALCULATE NEW PRICES - Bitrix v3.0\n// Source: Bitrix catalog.price.list (type 6)\n// Mapping: WB offer_id -> Bitrix productId\n// - XXXXX -> XXXXX (direct)\n// - 888XXXXX -> XXXXX with 1.3x multiplier (new edition)\n// See full code in n8n workflow"
+      }
+    },
+    {
+      "id": "check-prices",
+      "name": "Has Updates?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1440, 300],
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.prices_to_update }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "update-wb-prices",
+      "name": "Update WB Prices",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1640, 200],
+      "parameters": {
+        "jsCode": "// UPDATE WILDBERRIES PRICES\n// POST /api/v2/upload/task\n// See full code in n8n workflow"
+      }
+    },
+    {
+      "id": "no-updates",
+      "name": "No Updates Needed",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1640, 400],
+      "parameters": {}
+    },
+    {
+      "id": "format-telegram",
+      "name": "Format Telegram",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1840, 200],
+      "parameters": {
+        "jsCode": "// Format message for Telegram notification\n// Shows: multiplier, matched products, Bitrix stats, update results"
+      }
+    },
+    {
+      "id": "send-telegram",
+      "name": "Send Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [2040, 200],
+      "parameters": {
+        "operation": "sendMessage",
+        "chatId": "95677718",
+        "text": "={{ $json.message }}",
+        "additionalFields": { "parse_mode": "Markdown" }
+      }
+    }
+  ],
+  "connections": {
+    "Every 30 min": { "main": [[{ "node": "Get Config", "type": "main", "index": 0 }]] },
+    "Get Config": { "main": [[{ "node": "Analyze Demand", "type": "main", "index": 0 }]] },
+    "Analyze Demand": { "main": [[{ "node": "Save Config", "type": "main", "index": 0 }]] },
+    "Save Config": { "main": [[{ "node": "Get WB Prices", "type": "main", "index": 0 }]] },
+    "Get WB Prices": { "main": [[{ "node": "Calculate New Prices", "type": "main", "index": 0 }]] },
+    "Calculate New Prices": { "main": [[{ "node": "Has Updates?", "type": "main", "index": 0 }]] },
+    "Has Updates?": {
+      "main": [
+        [{ "node": "Update WB Prices", "type": "main", "index": 0 }],
+        [{ "node": "No Updates Needed", "type": "main", "index": 0 }]
+      ]
+    },
+    "Update WB Prices": { "main": [[{ "node": "Format Telegram", "type": "main", "index": 0 }]] },
+    "Format Telegram": { "main": [[{ "node": "Send Telegram", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "_note": "Full code in n8n. This file is for documentation purposes."
+}

@@ -57,7 +57,11 @@ dynamic-pricing/
 | threshold_low | 0.8 | Порог снижения |
 | threshold_high | 1.2 | Порог повышения |
 
-**Источник базовых цен:** PHP файл (legacy) → планируется миграция на Bitrix
+**Источник базовых цен:** Bitrix catalog.price.list (type 6)
+**Маппинг:**
+- WB `XXXXX` → Bitrix `XXXXX` (прямое соответствие)
+- WB `888XXXXX` → Bitrix `XXXXX` × **1.3** (новый тираж, +30% наценка)
+**Формула:** discount% = (1 - base × multiplier / wbPrice) × 100
 
 ## Алгоритм
 
