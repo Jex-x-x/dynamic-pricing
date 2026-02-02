@@ -58,10 +58,11 @@ dynamic-pricing/
 | threshold_high | 1.2 | Порог повышения |
 
 **Источник базовых цен:** Bitrix catalog.price.list (type 6)
-**Маппинг:**
-- WB `XXXXX` → Bitrix `XXXXX` (прямое соответствие)
-- WB `888XXXXX` → Bitrix `XXXXX` × **1.3** (новый тираж, +30% наценка)
+**Маппинг:** WB `vendorCode` → Bitrix `productId`
+- `vendorCode` → Bitrix `productId` (прямое соответствие)
+- `888vendorCode` → Bitrix `productId` × **1.3** (новый тираж, +30% наценка)
 **Формула:** discount% = (1 - base × multiplier / wbPrice) × 100
+**Batch:** 1000 товаров за запрос (лимит WB API)
 
 ## Алгоритм
 
